@@ -1,0 +1,3 @@
+openpyxl,
+beautifulsoap4,
+selenium
