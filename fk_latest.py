@@ -8,31 +8,28 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 
 
-def get_excel_path(base_name):
+def get_main_excel_path():
     """
-    Finds file path dynamically whether the filename has .xlsx or no extension.
+    Locates the main Flipkart input workbook.
     """
     possible_paths = [
-        base_name,
-        f"{base_name}.xlsx",
-        os.path.join(r"C:\Users\sai\OneDrive\Desktop\flipkart", base_name),
-        os.path.join(r"C:\Users\sai\OneDrive\Desktop\flipkart", f"{base_name}.xlsx"),
+        "FK Walkthrough 11th aug.xlsx",
+        "FK Walkthrough 11th aug",
+        r"C:\Users\sai\OneDrive\Desktop\flipkart\FK Walkthrough 11th aug.xlsx",
     ]
-
     for path in possible_paths:
         if os.path.exists(path):
             return path
-
-    return None
+    return "FK Walkthrough 11th aug.xlsx"
 
 
 def get_clean_price(html_source):
     """
-    Extracts numerical price from Flipkart product page HTML.
+    Extracts price from Flipkart page HTML.
     """
     soup = BeautifulSoup(html_source, "html.parser")
 
-    # 1. Primary Method: Inspect application/ld+json structured data
+    # Primary Method: JSON-LD structured data
     json_ld_scripts = soup.find_all("script", type="application/ld+json")
     for script in json_ld_scripts:
         if script.string:
@@ -50,7 +47,7 @@ def get_clean_price(html_source):
             except Exception:
                 continue
 
-    # 2. Fallback Method: Target main selling price using regex
+    # Fallback Method: Regular expression
     matches = re.findall(r"₹\s*([0-9,]+)", html_source)
     if matches:
         return matches[0].replace(",", "").strip()
@@ -60,44 +57,63 @@ def get_clean_price(html_source):
 
 def append_issue_row(target_file_name, row_data):
     """
-    Appends a formatted discrepancy row into the target issue workbook.
-    Expected row_data format:
-    [Flipkart Serial Number, Seller SKU Id, Product Title, AZ Price, Current Price, Remark]
+    Finds or creates the issue workbook without crashing on missing/invalid files,
+    adds the headers if necessary, and appends the discrepancy row.
     """
-    target_path = get_excel_path(target_file_name)
+    headers = [
+        "Flipkart Serial Number",
+        "Seller SKU Id",
+        "Product Title",
+        "AZ Price",
+        "Current Price",
+        "Remark"
+    ]
+
+    target_path = None
+    for path_option in [target_file_name, f"{target_file_name}.xlsx"]:
+        if os.path.exists(path_option):
+            target_path = path_option
+            break
+
     if not target_path:
-        print(f" [Warning] Could not locate issue workbook for '{target_file_name}'. Skipping dump.")
-        return
+        target_path = target_file_name
+
+    issue_wb = None
+    issue_ws = None
+
+    if os.path.exists(target_path):
+        try:
+            issue_wb = openpyxl.load_workbook(target_path)
+            issue_ws = issue_wb.active
+        except Exception:
+            issue_wb = openpyxl.Workbook()
+            issue_ws = issue_wb.active
+            issue_ws.append(headers)
+    else:
+        issue_wb = openpyxl.Workbook()
+        issue_ws = issue_wb.active
+        issue_ws.append(headers)
+
+    if issue_ws.max_row < 1 or issue_ws.cell(row=1, column=1).value is None:
+        issue_ws.append(headers)
+
+    issue_ws.append(row_data)
 
     try:
-        issue_wb = openpyxl.load_workbook(target_path)
-        issue_ws = issue_wb.active
-
-        # If empty file, initialize headers matching Image 2
-        if issue_ws.max_row == 1 and issue_ws.cell(row=1, column=1).value is None:
-            issue_ws.append([
-                "Flipkart Serial Number",
-                "Seller SKU Id",
-                "Product Title",
-                "AZ Price",
-                "Current Price",
-                "Remark"
-            ])
-
-        issue_ws.append(row_data)
         issue_wb.save(target_path)
     except Exception as e:
-        print(f" [Error] Failed to write to {target_file_name}: {e}")
+        print(f" [Error] Could not save issue file '{target_path}': {e}")
 
 
 def main():
-    main_excel_file = get_excel_path("FK Walkthrough 10th aug")
-    if not main_excel_file:
-        raise FileNotFoundError("Could not locate main file 'FK Walkthrough 10th aug.xlsx'.")
+    main_excel_file = get_main_excel_path()
+    if not os.path.exists(main_excel_file):
+        raise FileNotFoundError(f"Could not locate '{main_excel_file}'")
 
-    wb = openpyxl.load_workbook(main_excel_file)
+    # LOAD WORKBOOK WITH data_only=True TO EVALUATE VLOOKUP/IFERROR FORMULAS
+    wb = openpyxl.load_workbook(main_excel_file, data_only=True)
 
-    # Configure Headless Chrome for GitHub Actions Cloud Execution
+    # Configure Headless Chrome
     chrome_options = Options()
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--incognito")
@@ -112,7 +128,6 @@ def main():
     print("Launching Headless Chrome Driver for Flipkart...")
     driver = webdriver.Chrome(options=chrome_options)
 
-    # Sheets to skip
     skip_sheets = {"amzon home", "amazon home", "sheet1", "sheet 1"}
 
     for sheet_name in wb.sheetnames:
@@ -129,7 +144,6 @@ def main():
         def get_col_idx(name, default_idx=-1):
             return headers.index(name) + 1 if name in headers else default_idx
 
-        # Locate core column indices dynamically
         url_col_idx = get_col_idx("URL", 6)
         price_col_idx = get_col_idx("Current Price", get_col_idx("Current", -1))
         stock_col_idx = get_col_idx("FK Stock", 13)
@@ -146,7 +160,7 @@ def main():
         total_rows = ws.max_row
 
         for row in range(2, total_rows + 1):
-            # 1. Stock Check: Must be >= 50
+            # Stock Check >= 50
             stock_val = ws.cell(row=row, column=stock_col_idx).value
             try:
                 stock_count = float(stock_val) if stock_val is not None else 0
@@ -166,7 +180,7 @@ def main():
 
             try:
                 driver.get(url)
-                time.sleep(2.5)  # Allow page to render
+                time.sleep(2.5)
 
                 current_price_str = get_clean_price(driver.page_source)
 
@@ -183,47 +197,49 @@ def main():
                     ws.cell(row=row, column=price_col_idx, value="Not Found")
                     print_price = "Not Found"
 
-                # 2. Check Price Difference against AZ Price
+                # Check price difference against AZ Price
                 az_price_val = ws.cell(row=row, column=az_price_col_idx).value if az_price_col_idx != -1 else None
 
                 if current_price_val is not None and az_price_val is not None:
                     try:
-                        az_num = float(az_price_val)
-                        curr_num = float(current_price_val)
-                        price_diff = abs(az_num - curr_num)
+                        # Extract clean numbers out of formula results or strings
+                        az_clean = re.sub(r"[^\d.]", "", str(az_price_val))
+                        if az_clean:
+                            az_num = float(az_clean)
+                            curr_num = float(current_price_val)
+                            price_diff = abs(az_num - curr_num)
 
-                        # Trigger issue report if difference > 10 (or non-zero difference)
-                        if price_diff > 10:
-                            if curr_num < az_num:
-                                remark = "Current price is Less than Amazon price"
-                            else:
-                                remark = "Current price is More than Amazon price"
-
-                            # Read row details for report payload
-                            fsn = ws.cell(row=row, column=fsn_col_idx).value or ""
-                            sku = ws.cell(row=row, column=sku_col_idx).value or ""
-                            title = ws.cell(row=row, column=title_col_idx).value or ""
-                            category = str(ws.cell(row=row, column=category_col_idx).value or "").lower()
-
-                            report_row = [fsn, sku, title, az_num, curr_num, remark]
-
-                            # Determine destination target file
-                            target_file = clean_sheet_name
-
-                            # Categorization split for Roma / Power Banks
-                            if "roma" in clean_sheet_name.lower():
-                                if "powerbank" in category or "power bank" in category or "power bank" in str(title).lower():
-                                    target_file = "Power Banks"
+                            if price_diff > 10:
+                                if curr_num < az_num:
+                                    remark = "Current price is Less than Amazon price"
                                 else:
-                                    target_file = "Roma"
+                                    remark = "Current price is More than Amazon price"
 
-                            append_issue_row(target_file, report_row)
-                            print(f"[{row-1}/{total_rows-1}] Row {row} Updated -> Price: {print_price} | Issue logged to '{target_file}': {remark}")
+                                fsn = ws.cell(row=row, column=fsn_col_idx).value or ""
+                                sku = ws.cell(row=row, column=sku_col_idx).value or ""
+                                title = ws.cell(row=row, column=title_col_idx).value or ""
+                                category = str(ws.cell(row=row, column=category_col_idx).value or "").lower()
+
+                                report_row = [fsn, sku, title, az_num, curr_num, remark]
+
+                                target_file = clean_sheet_name
+
+                                # Routing logic for Roma vs Power Banks
+                                if "roma" in clean_sheet_name.lower():
+                                    if "powerbank" in category or "power bank" in category or "power bank" in str(title).lower():
+                                        target_file = "Power Banks"
+                                    else:
+                                        target_file = "Roma"
+
+                                append_issue_row(target_file, report_row)
+                                print(f"[{row-1}/{total_rows-1}] Row {row} Updated -> Price: {print_price} | Logged to '{target_file}': {remark}")
+                            else:
+                                print(f"[{row-1}/{total_rows-1}] Row {row} Updated -> Price: {print_price} | Diff <= 10.")
                         else:
-                            print(f"[{row-1}/{total_rows-1}] Row {row} Updated -> Price: {print_price} | Difference <= 10. No issue logged.")
+                            print(f"[{row-1}/{total_rows-1}] Row {row} Updated -> Price: {print_price} | AZ Price formula evaluated to 0/empty.")
 
                     except (ValueError, TypeError) as e:
-                        print(f"[{row-1}/{total_rows-1}] Row {row} Updated -> Price: {print_price} | Could not calculate AZ difference: {e}")
+                        print(f"[{row-1}/{total_rows-1}] Row {row} Updated -> Price: {print_price} | Price calculation error: {e}")
                 else:
                     print(f"[{row-1}/{total_rows-1}] Row {row} Updated -> Price: {print_price}")
 
@@ -234,7 +250,7 @@ def main():
 
     wb.save(main_excel_file)
     print("\n" + "=" * 60)
-    print("All prices updated and issue reports successfully created/dumped!")
+    print("All prices updated and issue reports successfully updated!")
 
 
 if __name__ == "__main__":
