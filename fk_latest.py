@@ -26,16 +26,24 @@ def get_main_excel_path():
 def get_clean_price(html_source):
     """
     Extracts price from Flipkart page HTML.
-    Returns "N/A" if out of stock or price unavailable.
+    Captures price even if the item is 'Notify Me' (Out of Stock).
     """
     soup = BeautifulSoup(html_source, "html.parser")
 
-    # Check for Out of Stock indicators
-    stock_text = soup.get_text().lower()
-    if "currently unavailable" in stock_text or "sold out" in stock_text:
-        return "N/A"
+    # 1. Primary Method: Direct HTML Class targeting (Bypasses OutOfStock backend status)
+    price_selectors = [
+        "div.Nx9bqj.CxhGGd",  # Modern Flipkart desktop price class
+        "div._30jeq3._16Jk6d", # Older/Alternate Flipkart price class
+    ]
+    
+    for selector in price_selectors:
+        price_elem = soup.select_one(selector)
+        if price_elem and price_elem.text:
+            cleaned = re.sub(r"[^\d.]", "", price_elem.text.strip())
+            if cleaned:
+                return cleaned
 
-    # Primary Method: JSON-LD structured data
+    # 2. Fallback Method: JSON-LD structured data
     json_ld_scripts = soup.find_all("script", type="application/ld+json")
     for script in json_ld_scripts:
         if script.string:
@@ -48,18 +56,13 @@ def get_clean_price(html_source):
                     if isinstance(offers, list):
                         offers = offers[0]
                     
-                    # Check offer availability
-                    availability = str(offers.get("availability", "")).lower()
-                    if "outofstock" in availability:
-                        return "N/A"
-
                     price = offers.get("price") or offers.get("lowPrice")
                     if price and str(price).strip() not in ["0", "None", ""]:
                         return str(price).replace(",", "").strip()
             except Exception:
                 continue
 
-    # Fallback Method: Regular expression for primary selling price
+    # 3. Last Resort Fallback: Regex matching
     matches = re.findall(r"₹\s*([0-9,]+)", html_source)
     if matches:
         return matches[0].replace(",", "").strip()
