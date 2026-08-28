@@ -6,12 +6,13 @@ import openpyxl
 from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
 
 def get_main_excel_path():
-    """
-    Locates the main Flipkart input workbook.
-    """
+    """Locates the main Flipkart input workbook."""
     possible_paths = [
         "FK Walkthrough 11th aug.xlsx",
         "FK Walkthrough 11th aug",
@@ -23,19 +24,34 @@ def get_main_excel_path():
     return "FK Walkthrough 11th aug.xlsx"
 
 
-def get_clean_price(html_source):
+def get_clean_price(driver):
     """
-    Extracts price from Flipkart page HTML.
-    Captures price even if the item is 'Notify Me' (Out of Stock).
+    Extracts the exact selling price from the Flipkart product page.
+    Uses explicit DOM element waits to avoid fetching strike-through/MRP prices.
     """
-    soup = BeautifulSoup(html_source, "html.parser")
-
-    # 1. Primary Method: Direct HTML Class targeting (Bypasses OutOfStock backend status)
+    # Primary price container classes on Flipkart
     price_selectors = [
-        "div.Nx9bqj.CxhGGd",  # Modern Flipkart desktop price class
-        "div._30jeq3._16Jk6d", # Older/Alternate Flipkart price class
+        "div.Nx9bqj.CxhGGd",     # Main active selling price on desktop
+        "div.Nx9bqj",             # Generic updated selling price class
+        "div._30jeq3._16Jk6d",     # Older main product selling price
+        "div._30jeq3",             # Older standard selling price
     ]
-    
+
+    # 1. Selenium Explicit Wait on live DOM element
+    for selector in price_selectors:
+        try:
+            elem = WebDriverWait(driver, 5).until(
+                EC.visibility_of_element_located((By.CSS_SELECTOR, selector))
+            )
+            text = elem.text.strip()
+            cleaned = re.sub(r"[^\d.]", "", text)
+            if cleaned:
+                return cleaned
+        except Exception:
+            continue
+
+    # 2. BeautifulSoup parse scoped strictly to price classes (ignoring MRP/strikethrough classes like .yRaY8j or ._3I9_wc)
+    soup = BeautifulSoup(driver.page_source, "html.parser")
     for selector in price_selectors:
         price_elem = soup.select_one(selector)
         if price_elem and price_elem.text:
@@ -43,7 +59,7 @@ def get_clean_price(html_source):
             if cleaned:
                 return cleaned
 
-    # 2. Fallback Method: JSON-LD structured data
+    # 3. Fallback Method: JSON-LD structured data
     json_ld_scripts = soup.find_all("script", type="application/ld+json")
     for script in json_ld_scripts:
         if script.string:
@@ -55,32 +71,24 @@ def get_clean_price(html_source):
                     offers = data["offers"]
                     if isinstance(offers, list):
                         offers = offers[0]
-                    
                     price = offers.get("price") or offers.get("lowPrice")
                     if price and str(price).strip() not in ["0", "None", ""]:
                         return str(price).replace(",", "").strip()
             except Exception:
                 continue
 
-    # 3. Last Resort Fallback: Regex matching
-    matches = re.findall(r"₹\s*([0-9,]+)", html_source)
-    if matches:
-        return matches[0].replace(",", "").strip()
-
     return "N/A"
 
 
 def append_issue_row(target_file_name, row_data):
-    """
-    Appends discrepancy row to target issue workbook.
-    """
+    """Appends discrepancy row to target issue workbook."""
     headers = [
         "Flipkart Serial Number",
         "Seller SKU Id",
         "Product Title",
         "AZ Price",
         "Current Price",
-        "Remark"
+        "Remark",
     ]
 
     target_path = None
@@ -143,126 +151,148 @@ def main():
 
     skip_sheets = {"amzon home", "amazon home", "sheet1", "sheet 1"}
 
-    for sheet_name in wb.sheetnames:
-        clean_sheet_name = sheet_name.strip()
-        if clean_sheet_name.lower() in skip_sheets:
-            print(f"\nSkipping sheet: '{sheet_name}'")
-            continue
-
-        ws = wb[sheet_name]
-        print(f"\n{'=' * 60}\nProcessing sheet: '{sheet_name}'\n{'=' * 60}")
-
-        headers = [str(cell.value).strip() if cell.value is not None else "" for cell in ws[1]]
-
-        def get_col_idx(name, default_idx=-1):
-            return headers.index(name) + 1 if name in headers else default_idx
-
-        url_col_idx = get_col_idx("URL", 6)
-        price_col_idx = get_col_idx("Current Price", get_col_idx("Current", -1))
-        stock_col_idx = get_col_idx("FK Stock", 13)
-        az_price_col_idx = get_col_idx("AZ Price", get_col_idx("Amazon Price", -1))
-        fsn_col_idx = get_col_idx("Flipkart Serial Number", get_col_idx("FSN", 1))
-        sku_col_idx = get_col_idx("Seller SKU Id", get_col_idx("SKU", 2))
-        title_col_idx = get_col_idx("Product Title", get_col_idx("Title", 3))
-        category_col_idx = get_col_idx("Category", get_col_idx("Sub-Category", -1))
-
-        if price_col_idx == -1:
-            print(f"Skipping sheet '{sheet_name}': 'Current Price' column not found.")
-            continue
-
-        total_rows = ws.max_row
-
-        for row in range(2, total_rows + 1):
-            # Stock Check >= 50
-            stock_val = ws.cell(row=row, column=stock_col_idx).value
-            try:
-                stock_count = float(stock_val) if stock_val is not None else 0
-            except (ValueError, TypeError):
-                stock_count = 0
-
-            if stock_count < 50:
-                print(f"[{row-1}/{total_rows-1}] Stock is {stock_val} (< 50). Skipping Row {row}.")
+    try:
+        for sheet_name in wb.sheetnames:
+            clean_sheet_name = sheet_name.strip()
+            if clean_sheet_name.lower() in skip_sheets:
+                print(f"\nSkipping sheet: '{sheet_name}'")
                 continue
 
-            url_cell = ws.cell(row=row, column=url_col_idx).value
-            url = str(url_cell).strip() if url_cell else ""
+            ws = wb[sheet_name]
+            print(f"\n{'=' * 60}\nProcessing sheet: '{sheet_name}'\n{'=' * 60}")
 
-            if not url.startswith("http"):
-                print(f"[{row-1}/{total_rows-1}] Invalid/Missing URL. Skipping Row {row}.")
+            headers = [
+                str(cell.value).strip() if cell.value is not None else ""
+                for cell in ws[1]
+            ]
+
+            def get_col_idx(name, default_idx=-1):
+                return headers.index(name) + 1 if name in headers else default_idx
+
+            url_col_idx = get_col_idx("URL", 6)
+            price_col_idx = get_col_idx("Current Price", get_col_idx("Current", -1))
+            stock_col_idx = get_col_idx("FK Stock", 13)
+            az_price_col_idx = get_col_idx("AZ Price", get_col_idx("Amazon Price", -1))
+            fsn_col_idx = get_col_idx("Flipkart Serial Number", get_col_idx("FSN", 1))
+            sku_col_idx = get_col_idx("Seller SKU Id", get_col_idx("SKU", 2))
+            title_col_idx = get_col_idx("Product Title", get_col_idx("Title", 3))
+            category_col_idx = get_col_idx("Category", get_col_idx("Sub-Category", -1))
+
+            if price_col_idx == -1:
+                print(f"Skipping sheet '{sheet_name}': 'Current Price' column not found.")
                 continue
 
-            try:
-                driver.get(url)
-                time.sleep(2.5)
+            total_rows = ws.max_row
 
-                current_price_str = get_clean_price(driver.page_source)
+            for row in range(2, total_rows + 1):
+                # Stock Check >= 50
+                stock_val = ws.cell(row=row, column=stock_col_idx).value
+                try:
+                    stock_count = float(stock_val) if stock_val is not None else 0
+                except (ValueError, TypeError):
+                    stock_count = 0
 
-                # Process current scraped price
-                if current_price_str not in ["N/A", "Not Found", ""]:
-                    try:
-                        current_price_val = float(current_price_str) if "." in current_price_str else int(current_price_str)
-                        ws.cell(row=row, column=price_col_idx, value=current_price_val)
-                        print_price = f"₹{current_price_val}"
-                    except ValueError:
+                if stock_count < 50:
+                    print(f"[{row-1}/{total_rows-1}] Stock is {stock_val} (< 50). Skipping Row {row}.")
+                    continue
+
+                url_cell = ws.cell(row=row, column=url_col_idx).value
+                url = str(url_cell).strip() if url_cell else ""
+
+                if not url.startswith("http"):
+                    print(f"[{row-1}/{total_rows-1}] Invalid/Missing URL. Skipping Row {row}.")
+                    continue
+
+                try:
+                    driver.get(url)
+
+                    # Extract price directly via explicit waits and specific containers
+                    current_price_str = get_clean_price(driver)
+
+                    # Process current scraped price
+                    if current_price_str not in ["N/A", "Not Found", ""]:
+                        try:
+                            current_price_val = (
+                                float(current_price_str)
+                                if "." in current_price_str
+                                else int(current_price_str)
+                            )
+                            ws.cell(row=row, column=price_col_idx, value=current_price_val)
+                            print_price = f"₹{current_price_val}"
+                        except ValueError:
+                            current_price_val = None
+                            ws.cell(row=row, column=price_col_idx, value="N/A")
+                            print_price = "N/A"
+                    else:
                         current_price_val = None
                         ws.cell(row=row, column=price_col_idx, value="N/A")
                         print_price = "N/A"
-                else:
-                    current_price_val = None
-                    ws.cell(row=row, column=price_col_idx, value="N/A")
-                    print_price = "N/A"
 
-                # Extract and parse AZ Price safely
-                az_price_val = ws.cell(row=row, column=az_price_col_idx).value if az_price_col_idx != -1 else None
-                az_clean_str = re.sub(r"[^\d.]", "", str(az_price_val)) if az_price_val is not None else ""
+                    # Extract and parse AZ Price safely
+                    az_price_val = (
+                        ws.cell(row=row, column=az_price_col_idx).value
+                        if az_price_col_idx != -1
+                        else None
+                    )
+                    az_clean_str = (
+                        re.sub(r"[^\d.]", "", str(az_price_val))
+                        if az_price_val is not None
+                        else ""
+                    )
 
-                # Evaluate difference ONLY IF BOTH prices are valid numbers
-                if current_price_val is not None and az_clean_str != "":
-                    try:
-                        az_num = float(az_clean_str)
-                        curr_num = float(current_price_val)
-                        price_diff = abs(az_num - curr_num)
+                    # Evaluate difference only when both prices are valid numbers
+                    if current_price_val is not None and az_clean_str != "":
+                        try:
+                            az_num = float(az_clean_str)
+                            curr_num = float(current_price_val)
+                            price_diff = abs(az_num - curr_num)
 
-                        if price_diff > 10:
-                            if curr_num < az_num:
-                                remark = "Current price is Less than Amazon price"
-                            else:
-                                remark = "Current price is More than Amazon price"
-
-                            fsn = ws.cell(row=row, column=fsn_col_idx).value or ""
-                            sku = ws.cell(row=row, column=sku_col_idx).value or ""
-                            title = ws.cell(row=row, column=title_col_idx).value or ""
-                            category = str(ws.cell(row=row, column=category_col_idx).value or "").lower()
-
-                            report_row = [fsn, sku, title, az_num, curr_num, remark]
-
-                            target_file = clean_sheet_name
-
-                            # Category splitting for Roma vs Power Banks
-                            if "roma" in clean_sheet_name.lower():
-                                if "powerbank" in category or "power bank" in category or "power bank" in str(title).lower():
-                                    target_file = "Power Banks"
+                            if price_diff > 10:
+                                if curr_num < az_num:
+                                    remark = "Current price is Less than Amazon price"
                                 else:
-                                    target_file = "Roma"
+                                    remark = "Current price is More than Amazon price"
 
-                            append_issue_row(target_file, report_row)
-                            print(f"[{row-1}/{total_rows-1}] Row {row} Updated -> Price: {print_price} | Logged to '{target_file}': {remark}")
-                        else:
-                            print(f"[{row-1}/{total_rows-1}] Row {row} Updated -> Price: {print_price} | Diff <= 10.")
+                                fsn = ws.cell(row=row, column=fsn_col_idx).value or ""
+                                sku = ws.cell(row=row, column=sku_col_idx).value or ""
+                                title = ws.cell(row=row, column=title_col_idx).value or ""
+                                category = str(
+                                    ws.cell(row=row, column=category_col_idx).value or ""
+                                ).lower()
 
-                    except (ValueError, TypeError) as e:
-                        print(f"[{row-1}/{total_rows-1}] Row {row} Updated -> Price: {print_price} | Calculation error: {e}")
-                else:
-                    print(f"[{row-1}/{total_rows-1}] Row {row} Updated -> Price: {print_price} | Skipping diff check (AZ or Current Price is N/A)")
+                                report_row = [fsn, sku, title, az_num, curr_num, remark]
 
-            except Exception as err:
-                print(f"[{row-1}/{total_rows-1}] Row {row} Error processing URL: {err}")
+                                target_file = clean_sheet_name
 
-    driver.quit()
+                                # Category splitting for Roma vs Power Banks
+                                if "roma" in clean_sheet_name.lower():
+                                    if (
+                                        "powerbank" in category
+                                        or "power bank" in category
+                                        or "power bank" in str(title).lower()
+                                    ):
+                                        target_file = "Power Banks"
+                                    else:
+                                        target_file = "Roma"
 
-    wb.save(main_excel_file)
-    print("\n" + "=" * 60)
-    print("All prices updated and issue reports successfully created!")
+                                append_issue_row(target_file, report_row)
+                                print(f"[{row-1}/{total_rows-1}] Row {row} Updated -> Price: {print_price} | Logged to '{target_file}': {remark}")
+                            else:
+                                print(f"[{row-1}/{total_rows-1}] Row {row} Updated -> Price: {print_price} | Diff <= 10.")
+
+                        except (ValueError, TypeError) as e:
+                            print(f"[{row-1}/{total_rows-1}] Row {row} Updated -> Price: {print_price} | Calculation error: {e}")
+                    else:
+                        print(f"[{row-1}/{total_rows-1}] Row {row} Updated -> Price: {print_price} | Skipping diff check (AZ or Current Price is N/A)")
+
+                except Exception as err:
+                    print(f"[{row-1}/{total_rows-1}] Row {row} Error processing URL: {err}")
+
+    finally:
+        driver.quit()
+        wb.save(main_excel_file)
+        print("\n" + "=" * 60)
+        print("All prices updated and issue reports successfully created!")
 
 
 if __name__ == "__main__":
